@@ -9,28 +9,66 @@ export default function ColorPaletteGenerator() {
   const [isGenerating, setIsGenerating] = useState(false);
   const [generatedPalette, setGeneratedPalette] = useState([]);
   const [copiedIndex, setCopiedIndex] = useState(-1);
+  const [error, setError] = useState(null);
   const fileInputRef = useRef(null);
+  
+  // Backend API endpoint - adjust the URL based on your FastAPI server
+  const API_BASE_URL = 'http://localhost:8000'; // Change this to match your backend URL
 
-  // Mock color generation function
-  const generateColors = () => {
-    const palettes = [
-      ['#FF6B6B', '#4ECDC4', '#45B7D1', '#96CEB4', '#FFEAA7'],
-      ['#667eea', '#764ba2', '#f093fb', '#f5576c', '#4facfe'],
-      ['#43cea2', '#185a9d', '#667db6', '#0082c8', '#667db6'],
-      ['#fd79a8', '#fdcb6e', '#6c5ce7', '#a29bfe', '#fd79a8'],
-      ['#ff7675', '#74b9ff', '#0984e3', '#00b894', '#fdcb6e']
-    ];
-    return palettes[Math.floor(Math.random() * palettes.length)];
+  // API call to FastAPI backend
+  const callColorGenerationAPI = async (data, isImage = false) => {
+    const endpoint = isImage ? '/generate-from-image' : '/generate-from-text';
+    
+    const response = await fetch(`${API_BASE_URL}${endpoint}`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': isImage ? 'multipart/form-data' : 'application/json',
+      },
+      body: isImage ? data : JSON.stringify(data),
+    });
+
+    if (!response.ok) {
+      throw new Error(`API call failed: ${response.status} ${response.statusText}`);
+    }
+
+    return await response.json();
   };
 
   const handleGenerate = async () => {
     if (!textPrompt.trim() && !uploadedImage) return;
     
     setIsGenerating(true);
-    // Simulate API call delay
-    await new Promise(resolve => setTimeout(resolve, 2000));
-    setGeneratedPalette(generateColors());
-    setIsGenerating(false);
+    setError(null);
+    
+    try {
+      let result;
+      
+      if (activeTab === 'text' && textPrompt.trim()) {
+        // Send text prompt to backend
+        result = await callColorGenerationAPI({ prompt: textPrompt });
+      } else if (activeTab === 'image' && uploadedImage) {
+        // Send image to backend
+        const formData = new FormData();
+        // Convert data URL to blob
+        const response = await fetch(uploadedImage);
+        const blob = await response.blob();
+        formData.append('image', blob, 'uploaded-image.jpg');
+        
+        result = await callColorGenerationAPI(formData, true);
+      }
+      
+      // Expected response format: { colors: [{ hex: '#FF6B6B', rgb: 'rgb(255,107,107)', hsl: 'hsl(0,100%,71%)' }, ...] }
+      if (result && result.colors) {
+        setGeneratedPalette(result.colors);
+      } else {
+        throw new Error('Invalid response format from API');
+      }
+    } catch (error) {
+      console.error('Error generating palette:', error);
+      setError(error.message || 'Failed to generate palette. Please try again.');
+    } finally {
+      setIsGenerating(false);
+    }
   };
 
   const handleImageUpload = (e) => {
@@ -42,8 +80,8 @@ export default function ColorPaletteGenerator() {
     }
   };
 
-  const copyToClipboard = (color, index) => {
-    navigator.clipboard.writeText(color);
+  const copyToClipboard = (colorValue, index) => {
+    navigator.clipboard.writeText(colorValue);
     setCopiedIndex(index);
     setTimeout(() => setCopiedIndex(-1), 1000);
   };
@@ -162,6 +200,18 @@ export default function ColorPaletteGenerator() {
           </button>
         </div>
 
+        {/* Error Display */}
+        {error && (
+          <div className="bg-red-50 border border-red-200 rounded-2xl p-4 mb-8">
+            <div className="flex items-center gap-2">
+              <div className="w-5 h-5 bg-red-500 rounded-full flex items-center justify-center">
+                <span className="text-white text-xs font-bold">!</span>
+              </div>
+              <p className="text-red-700 font-medium">Error: {error}</p>
+            </div>
+          </div>
+        )}
+
         {/* Generated Palette */}
         {generatedPalette.length > 0 && (
           <div className="bg-white rounded-3xl shadow-xl p-8 animate-in slide-in-from-bottom-4 duration-700">
@@ -173,35 +223,70 @@ export default function ColorPaletteGenerator() {
               </button>
             </div>
 
-            <div className="grid grid-cols-1 md:grid-cols-5 gap-4">
-              {generatedPalette.map((color, index) => (
-                <div
-                  key={index}
-                  className="group cursor-pointer animate-in zoom-in-0 duration-500"
-                  style={{ animationDelay: `${index * 100}ms` }}
-                  onClick={() => copyToClipboard(color, index)}
-                >
+            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+              {generatedPalette.map((colorObj, index) => {
+                // Handle both old format (string) and new format (object with hex, rgb, hsl)
+                const color = typeof colorObj === 'string' ? colorObj : colorObj.hex || colorObj.color;
+                const hex = typeof colorObj === 'string' ? colorObj : colorObj.hex || colorObj.color;
+                const rgb = typeof colorObj === 'string' ? null : colorObj.rgb;
+                const hsl = typeof colorObj === 'string' ? null : colorObj.hsl;
+
+                return (
                   <div
-                    className="h-32 rounded-2xl shadow-lg group-hover:shadow-xl transform group-hover:scale-105 transition-all duration-300 mb-4"
-                    style={{ backgroundColor: color }}
-                  />
-                  <div className="text-center">
-                    <p className="font-mono text-sm text-gray-600 group-hover:text-gray-800 transition-colors duration-200">
-                      {color}
-                    </p>
-                    <div className="flex items-center justify-center gap-1 mt-2 opacity-0 group-hover:opacity-100 transition-opacity duration-200">
-                      {copiedIndex === index ? (
-                        <span className="text-green-600 text-xs font-medium">Copied!</span>
-                      ) : (
-                        <>
-                          <Copy className="w-3 h-3 text-gray-400" />
-                          <span className="text-xs text-gray-400">Click to copy</span>
-                        </>
+                    key={index}
+                    className="group animate-in zoom-in-0 duration-500"
+                    style={{ animationDelay: `${index * 100}ms` }}
+                  >
+                    <div
+                      className="h-32 rounded-2xl shadow-lg group-hover:shadow-xl transform group-hover:scale-105 transition-all duration-300 mb-4"
+                      style={{ backgroundColor: color }}
+                    />
+                    
+                    {/* Color Information */}
+                    <div className="space-y-2">
+                      {/* HEX */}
+                      <div 
+                        className="cursor-pointer p-2 bg-gray-50 rounded-lg hover:bg-gray-100 transition-colors duration-200"
+                        onClick={() => copyToClipboard(hex, `hex-${index}`)}
+                      >
+                        <div className="flex items-center justify-between">
+                          <span className="text-xs font-medium text-gray-500 uppercase">HEX</span>
+                          {copiedIndex === `hex-${index}` && <span className="text-green-600 text-xs font-medium">Copied!</span>}
+                        </div>
+                        <p className="font-mono text-sm text-gray-700 mt-1">{hex}</p>
+                      </div>
+
+                      {/* RGB */}
+                      {rgb && (
+                        <div 
+                          className="cursor-pointer p-2 bg-gray-50 rounded-lg hover:bg-gray-100 transition-colors duration-200"
+                          onClick={() => copyToClipboard(rgb, `rgb-${index}`)}
+                        >
+                          <div className="flex items-center justify-between">
+                            <span className="text-xs font-medium text-gray-500 uppercase">RGB</span>
+                            {copiedIndex === `rgb-${index}` && <span className="text-green-600 text-xs font-medium">Copied!</span>}
+                          </div>
+                          <p className="font-mono text-sm text-gray-700 mt-1">{rgb}</p>
+                        </div>
+                      )}
+
+                      {/* HSL */}
+                      {hsl && (
+                        <div 
+                          className="cursor-pointer p-2 bg-gray-50 rounded-lg hover:bg-gray-100 transition-colors duration-200"
+                          onClick={() => copyToClipboard(hsl, `hsl-${index}`)}
+                        >
+                          <div className="flex items-center justify-between">
+                            <span className="text-xs font-medium text-gray-500 uppercase">HSL</span>
+                            {copiedIndex === `hsl-${index}` && <span className="text-green-600 text-xs font-medium">Copied!</span>}
+                          </div>
+                          <p className="font-mono text-sm text-gray-700 mt-1">{hsl}</p>
+                        </div>
                       )}
                     </div>
                   </div>
-                </div>
-              ))}
+                );
+              })}
             </div>
 
             {/* Palette Info */}
