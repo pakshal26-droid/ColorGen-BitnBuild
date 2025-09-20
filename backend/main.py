@@ -21,11 +21,34 @@ import uvicorn
 # Load environment
 load_dotenv()
 
+def to_py(value):
+    """Recursively convert numpy types to Python types"""
+    if isinstance(value, np.ndarray):
+        return value.tolist()
+    elif isinstance(value, (np.integer, np.int64, np.int32)):
+        return int(value)
+    elif isinstance(value, (np.floating, np.float64, np.float32)):
+        return float(value)
+    elif isinstance(value, list):
+        return [to_py(v) for v in value]
+    elif isinstance(value, dict):
+        return {k: to_py(v) for k, v in value.items()}
+    else:
+        return value
+
+
 class ColorInfo(BaseModel):
     hex: str
     rgb: List[int]
     hsl: List[int]
     name: str = ""
+
+class ContrastDetail(BaseModel):
+    color1: List[int]
+    color2: List[int]
+    contrast_ratio: float
+    aa_compliant: bool
+    aaa_compliant: bool
 
 class PaletteResponse(BaseModel):
     primary: List[ColorInfo]
@@ -35,6 +58,11 @@ class PaletteResponse(BaseModel):
     wcag_compliance: Dict[str, bool]
     colorblind_safe: bool
     method_used: str
+    contrast_details: Optional[List[Dict]] = []
+    colorblind_palettes: Optional[Dict[str, Dict[str, List[ColorInfo]]]] = None
+
+
+
 
 class ColorUtils:
     @staticmethod
@@ -49,10 +77,13 @@ class ColorUtils:
     
     @staticmethod
     def create_color_info(rgb, name=""):
+        # Ensure all values are Python ints, not numpy types
+        rgb_list = [int(x) for x in rgb]
+        hsl_list = [int(x) for x in ColorUtils.rgb_to_hsl(rgb)]
         return ColorInfo(
-            hex=ColorUtils.rgb_to_hex(rgb),
-            rgb=list(rgb),
-            hsl=ColorUtils.rgb_to_hsl(rgb),
+            hex=ColorUtils.rgb_to_hex(rgb_list),
+            rgb=rgb_list,
+            hsl=hsl_list,
             name=name
         )
     
@@ -334,36 +365,44 @@ Rules:
 class AccessibilityAuditor:
     @staticmethod
     def audit_palette(palette_dict):
-        """Audit palette for accessibility"""
+        """Audit palette for accessibility with contrast details"""
         all_colors = []
         for category in palette_dict.values():
             all_colors.extend([c.rgb for c in category])
         
-        # Check all color pairs
         total_pairs = 0
         aa_compliant = 0
         aaa_compliant = 0
-        
+        pair_details = []
+
         for i, color1 in enumerate(all_colors):
-            for color2 in all_colors[i+1:]:
+            for j, color2 in enumerate(all_colors[i+1:], start=i+1):
                 ratio = ColorUtils.contrast_ratio(color1, color2)
                 total_pairs += 1
-                if ratio >= 4.5:
-                    aa_compliant += 1
-                if ratio >= 7.0:
-                    aaa_compliant += 1
+                aa = ratio >= 4.5
+                aaa = ratio >= 7.0
+                if aa: aa_compliant += 1
+                if aaa: aaa_compliant += 1
+                pair_details.append({
+                    "color1": to_py(color1),
+                    "color2": to_py(color2),
+                    "contrast_ratio": round(float(ratio), 2),
+                    "aa_compliant": bool(aa),
+                    "aaa_compliant": bool(aaa)
+                })
         
         if total_pairs == 0:
-            return {'score': 0, 'aa': False, 'aaa': False}
-        
-        aa_rate = aa_compliant / total_pairs
-        aaa_rate = aaa_compliant / total_pairs
-        score = aa_rate * 0.7 + aaa_rate * 0.3
+            score = 0.0
+        else:
+            aa_rate = aa_compliant / total_pairs
+            aaa_rate = aaa_compliant / total_pairs
+            score = round(float(aa_rate * 0.7 + aaa_rate * 0.3), 3)
         
         return {
             'score': score,
-            'aa': aa_rate > 0.5,
-            'aaa': aaa_rate > 0.3
+            'aa': aa_rate > 0.5 if total_pairs else False,
+            'aaa': aaa_rate > 0.3 if total_pairs else False,
+            'contrast_details': pair_details
         }
     
     @staticmethod
@@ -377,7 +416,87 @@ class AccessibilityAuditor:
             return [int(0.625*r + 0.375*g), int(0.700*r + 0.300*g), int(0.300*g + 0.700*b)]
         elif cb_type == 'tritanopia':  # Blue-blind
             return [int(0.950*r + 0.050*g), int(0.433*g + 0.567*b), int(0.475*g + 0.525*b)]
-        return rgb
+        return [int(x) for x in rgb]  # Ensure Python ints
+    
+    @staticmethod
+    def check_colorblind_safety(palette_dict):
+        all_colors = []
+        for category in palette_dict.values():
+            all_colors.extend([c.rgb for c in category])
+        
+        cb_types = ["protanopia", "deuteranopia", "tritanopia"]
+        safe = True
+
+        for cb in cb_types:
+            simulated_colors = [AccessibilityAuditor.simulate_colorblind(c, cb) for c in all_colors]
+            for i, c1 in enumerate(simulated_colors):
+                for c2 in simulated_colors[i+1:]:
+                    if ColorUtils.contrast_ratio(c1, c2) < 2.5:
+                        safe = False
+                        break
+                if not safe:
+                    break
+            if not safe:
+                break
+        return safe
+    
+    @staticmethod
+    def auto_fix_palette(palette_dict):
+        """Attempt to fix palette to improve contrast and accessibility"""
+        fixed_palette = {k: [ColorInfo(**c.dict()) for c in v] for k, v in palette_dict.items()}
+
+        # Flatten all colors
+        all_colors = [c for category in fixed_palette.values() for c in category]
+
+        def adjust_luminance(rgb, factor):
+            """Lighten or darken color"""
+            return [int(x) for x in np.clip(np.array(rgb) * factor, 0, 255)]
+
+        improved = False
+        for i, c1 in enumerate(all_colors):
+            for j, c2 in enumerate(all_colors[i+1:], start=i+1):
+                ratio = ColorUtils.contrast_ratio(c1.rgb, c2.rgb)
+                if ratio < 4.5:  # Not AA compliant
+                    improved = True
+                    # Decide which color to adjust
+                    l1 = sum(c1.rgb)/3
+                    l2 = sum(c2.rgb)/3
+                    if l1 > l2:
+                        new_rgb = adjust_luminance(c1.rgb, 1.1)  # lighten
+                        c1.rgb = new_rgb
+                    else:
+                        new_rgb = adjust_luminance(c2.rgb, 0.9)  # darken
+                        c2.rgb = new_rgb
+                    # Update hex and HSL
+                    c1.hex = ColorUtils.rgb_to_hex(c1.rgb)
+                    c1.hsl = ColorUtils.rgb_to_hsl(c1.rgb)
+                    c2.hex = ColorUtils.rgb_to_hex(c2.rgb)
+                    c2.hsl = ColorUtils.rgb_to_hsl(c2.rgb)
+        return fixed_palette if improved else palette_dict
+    
+    @staticmethod
+    def generate_colorblind_palettes(palette_dict):
+        """Return simulated palettes for different color-blind types"""
+        cb_types = ["protanopia", "deuteranopia", "tritanopia"]
+        cb_palettes = {}
+
+        for cb in cb_types:
+            simulated = {}
+            for category, colors in palette_dict.items():
+                simulated[category] = []
+                for c in colors:
+                    sim_rgb = AccessibilityAuditor.simulate_colorblind(c.rgb, cb)
+                    simulated_color = ColorInfo(
+                        hex=ColorUtils.rgb_to_hex(sim_rgb),
+                        rgb=sim_rgb,  # Already converted to Python ints in simulate_colorblind
+                        hsl=ColorUtils.rgb_to_hsl(sim_rgb),
+                        name=c.name
+                    )
+                    simulated[category].append(simulated_color)
+            cb_palettes[cb] = simulated
+
+        return cb_palettes
+
 
 # =============================================================================
 # MAIN CHROMAGEN PIPELINE
@@ -389,16 +508,16 @@ class ChromaGenPipeline:
         self.llm = LLMGenerator(openai_key)
         self.auditor = AccessibilityAuditor()
     
-    def generate_palette(self, text_prompt=None, image_path=None, hybrid=True):
-        """Main palette generation method"""
+    def generate_palette(self, text_prompt=None, image_path=None, hybrid=True, auto_fix=True):
+        """Main palette generation method with auto-fix and color-blind simulation"""
         base_colors = None
         method_used = []
-        
+
         # Extract from image
         if image_path:
             base_colors, extraction_method = self.extractor.extract_palette(image_path)
             method_used.append(f"Image({extraction_method})")
-        
+
         # Generate/refine with LLM  
         if text_prompt:
             if hybrid and base_colors:
@@ -408,32 +527,40 @@ class ChromaGenPipeline:
                 palette_dict = self.llm.generate_from_prompt(text_prompt)
                 method_used.append("LLM-Only")
         elif base_colors:
-            # Organize extracted colors
             palette_dict = self._organize_colors(base_colors)
             method_used.append("Image-Only")
         else:
             raise ValueError("Need either text prompt or image")
-        
+
+        # Auto-fix accessibility
+        if auto_fix:
+            palette_dict = self.auditor.auto_fix_palette(palette_dict)
+
         # Audit accessibility
         audit_results = self.auditor.audit_palette(palette_dict)
-        
+
+        # Color-blind simulation palettes
+        cb_palettes = self.auditor.generate_colorblind_palettes(palette_dict)
+
         return PaletteResponse(
             primary=palette_dict.get('primary', []),
             secondary=palette_dict.get('secondary', []),
             accent=palette_dict.get('accent', []),
             accessibility_score=audit_results['score'],
             wcag_compliance={'aa': audit_results['aa'], 'aaa': audit_results['aaa']},
-            colorblind_safe=audit_results['score'] > 0.6,
-            method_used=" + ".join(method_used)
+            colorblind_safe=self.auditor.check_colorblind_safety(palette_dict),
+            method_used=" + ".join(method_used),
+            contrast_details=[],  # optional, can keep existing
+            colorblind_palettes=cb_palettes  # new field
         )
-    
+
     def _organize_colors(self, colors):
-        """Organize extracted colors into categories"""
         return {
             'primary': colors[:3],
             'secondary': colors[3:5] if len(colors) > 3 else [],
             'accent': colors[5:7] if len(colors) > 5 else []
         }
+
 
 # =============================================================================
 # FASTAPI APP
