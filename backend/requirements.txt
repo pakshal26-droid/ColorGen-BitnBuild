@@ -1,0 +1,21 @@
+
+# ChromaGen - Simple Dependencies
+
+# Core API
+fastapi
+uvicorn[standard]
+python-multipart
+
+# AI/ML - Only what we need
+tensorflow
+scikit-learn
+numpy
+opencv-python
+Pillow
+
+# LLM
+openai
+
+# Utilities
+python-dotenv
+pydantic
