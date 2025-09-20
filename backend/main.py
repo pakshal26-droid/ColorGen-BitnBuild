@@ -15,15 +15,11 @@ from fastapi import FastAPI, UploadFile, File, Form, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from openai import OpenAI
-
-
 from dotenv import load_dotenv
 import uvicorn
 
 # Load environment
 load_dotenv()
-
-client = OpenAI(api_key="")
 
 def to_py(value):
     """Recursively convert numpy types to Python types"""
@@ -296,58 +292,61 @@ class ImageColorExtractor:
 
 class LLMGenerator:
     def __init__(self, api_key):
+        self.client = OpenAI(api_key=api_key)
+    
+    def generate_from_prompt(self, prompt, base_colors=None):
+        """Generate palette from text prompt"""
+        
+        system_msg = """You are a color palette expert. Generate a JSON response with this structure:
+{
+    "primary": [{"rgb": [r,g,b], "name": "color_name"}, ...],
+    "secondary": [{"rgb": [r,g,b], "name": "color_name"}, ...], 
+    "accent": [{"rgb": [r,g,b], "name": "color_name"}, ...]
+}
 
-        def generate_from_prompt(self, prompt, base_colors=None):
-            """Generate palette from text prompt"""
+Rules:
+- Primary: 2-3 main colors
+- Secondary: 2-3 supporting colors  
+- Accent: 1-2 highlight colors
+- RGB values 0-255
+- Descriptive color names
+- Ensure harmony and good contrast"""
 
-            system_msg = """You are a color palette expert. Generate a JSON response with this structure:
-                            {
-                                "primary": [{"rgb": [r,g,b], "name": "color_name"}, ...],
-                                "secondary": [{"rgb": [r,g,b], "name": "color_name"}, ...], 
-                                "accent": [{"rgb": [r,g,b], "name": "color_name"}, ...]
-                            }
-
-                            Rules:
-                            - Primary: 2-3 main colors
-                            - Secondary: 2-3 supporting colors  
-                            - Accent: 1-2 highlight colors
-                            - RGB values 0-255
-                            - Descriptive color names
-                            - Ensure harmony and good contrast"""
-
-            user_msg = f"Create a palette for: {prompt}"
-
-            if base_colors:
-                base_desc = ", ".join([f"{c.name} ({c.hex})" for c in base_colors])
-                user_msg += f"\n\nRefine these image colors: {base_desc}"
-
-            try:
-                response = client.chat.completions.create(model="gpt-3.5-turbo",
+        user_msg = f"Create a palette for: {prompt}"
+        
+        if base_colors:
+            base_desc = ", ".join([f"{c.name} ({c.hex})" for c in base_colors])
+            user_msg += f"\n\nRefine these image colors: {base_desc}"
+        
+        try:
+            response = self.client.chat.completions.create(
+                model="gpt-3.5-turbo",
                 messages=[
                     {"role": "system", "content": system_msg},
                     {"role": "user", "content": user_msg}
                 ],
-                temperature=0.7)
-
-                content = response.choices[0].message.content.strip()
-                palette_data = json.loads(content)
-
-                # Convert to ColorInfo objects
-                result = {}
-                for category in ['primary', 'secondary', 'accent']:
-                    if category in palette_data:
-                        colors = []
-                        for color_data in palette_data[category]:
-                            rgb = color_data['rgb']
-                            name = color_data.get('name', f'{category}_color')
-                            colors.append(ColorUtils.create_color_info(rgb, name))
-                        result[category] = colors
-
-                return result
-
-            except Exception as e:
-                print(f"LLM failed: {e}")
-                return self._fallback_palette()
+                temperature=0.7
+            )
+            
+            content = response.choices[0].message.content.strip()
+            palette_data = json.loads(content)
+            
+            # Convert to ColorInfo objects
+            result = {}
+            for category in ['primary', 'secondary', 'accent']:
+                if category in palette_data:
+                    colors = []
+                    for color_data in palette_data[category]:
+                        rgb = color_data['rgb']
+                        name = color_data.get('name', f'{category}_color')
+                        colors.append(ColorUtils.create_color_info(rgb, name))
+                    result[category] = colors
+            
+            return result
+            
+        except Exception as e:
+            print(f"LLM failed: {e}")
+            return self._fallback_palette()
 
     def _fallback_palette(self):
         """Simple fallback when LLM fails"""
